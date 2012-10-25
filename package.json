@@ -1,0 +1,18 @@
+{
+  "name": "dmx",
+  "version": "1.0.0",
+  "description": "Control DMX512 compatible lighting system via FTDI USB-RS485 cable",
+  "author": {
+    "name": "Unkernet",
+    "email": "unkernet@gmail.com",
+    "url": "http://unker.net/"
+  },
+  "main": "./dmx_native.node",
+  "repository": {
+    "type": "git",
+    "url": "git://github.com/unkernet/node-dmx.git"
+  },
+  "engines": {
+    "node": ">= 0.6.0"
+  }
+}
