@@ -1,6 +1,6 @@
 {
   "name": "dmx",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Control DMX512 compatible lighting system via FTDI USB-RS485 cable",
   "author": {
     "name": "Unkernet",

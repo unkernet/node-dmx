@@ -4,12 +4,10 @@
 #include <string.h>
 #include <v8.h>
 #include <node.h>
-#include "WinTypes.h"
-#include "ftd2xx.h"
-#include "dmx.h"
-
+#include <ftdi.h>
 #include <sys/time.h>
 #include <time.h>
+#include "dmx.h"
 
 using namespace v8;
 
@@ -29,55 +27,43 @@ void CalculateSleep (timespec *sleep, unsigned int Hz) {
 
 Handle<Value> list(const Arguments& args) {
   HandleScope scope;
-  FT_STATUS ftStatus;
-  unsigned int numDevs;
+
   unsigned int i;
-  
-  ftStatus = FT_ListDevices(&numDevs, NULL, FT_LIST_NUMBER_ONLY);
-  if (ftStatus != FT_OK)
-    return scope.Close(ThrowException(Exception::Error(String::New("Can't enumerate ftdi2xx devices"))));
-    
-  Local<Array> ret = Array::New(numDevs);
-  Local<Object> obj;
-  
-  if (numDevs > 0) {
-    // Create buffers
-    char **descr = new char * [numDevs + 1];
-    char **serial = new char * [numDevs + 1];
-    unsigned int *loc = new unsigned int [numDevs + 1];
-    for (i = 0; i < numDevs; i++) {
-      descr[i] = new char[64];
-      serial[i] = new char[16];
-    }
-    descr[numDevs] = NULL;
-    serial[numDevs] = NULL;
-    
-    // Enumerate devices
-    ftStatus = (FT_ListDevices(descr,  &numDevs, FT_LIST_ALL | FT_OPEN_BY_DESCRIPTION  ) |
-                FT_ListDevices(serial, &numDevs, FT_LIST_ALL | FT_OPEN_BY_SERIAL_NUMBER) |
-                FT_ListDevices(loc,    &numDevs, FT_LIST_ALL | FT_OPEN_BY_LOCATION     ));        
-    if (ftStatus == FT_OK)
-      for (i = 0; i < numDevs; i++) {
-        obj = Object::New();
-        obj->Set(String::NewSymbol("description"), String::New(descr[i]));
-        obj->Set(String::NewSymbol("serial"), String::New(serial[i]));
-        obj->Set(String::NewSymbol("location"), Integer::New(loc[i]));
-        ret->Set(i, obj);
-      }
-    
-    // Free buffers
-    for (i = 0; i < numDevs; i++) {
-      delete[] descr[i];
-      delete[] serial[i];
-    }
-    delete[] descr;
-    delete[] serial;
-    delete[] loc;
-    
-    if (ftStatus != FT_OK)
-      return scope.Close(ThrowException(Exception::Error(String::New("Can't enumerate ftdi2xx devices"))));
+  int ret;
+  struct ftdi_context ftdic;
+  struct ftdi_device_list *devlist, *curdev;
+  char manufacturer[128], description[128], serial[128];
+  const size_t errln = 128;
+  char err[errln];
+
+  if (ftdi_init(&ftdic) < 0) {
+    return scope.Close(ThrowException(Exception::Error(String::New("ftdi_init failed"))));
   }
-  return scope.Close(ret);
+  if ((ret = ftdi_usb_find_all(&ftdic, &devlist, 0x0403, 0x6001)) < 0) {
+    snprintf(err, errln, "ftdi_usb_find_all failed: %d (%s)", ret, ftdi_get_error_string(&ftdic));
+    return scope.Close(ThrowException(Exception::Error(String::New(err))));
+  }
+  Local<Array> result = Array::New(ret);
+  Local<Object> obj;
+
+  i = 0;
+  for (curdev = devlist; curdev != NULL; i++) {
+      if ((ret = ftdi_usb_get_strings(&ftdic, curdev->dev, manufacturer, 128, description, 128, serial, 128)) < 0) {
+        snprintf(err, errln, "ftdi_usb_get_strings failed: %d (%s)", ret, ftdi_get_error_string(&ftdic));
+        scope.Close(ThrowException(Exception::Error(String::New(err))));
+      }
+      obj = Object::New();
+      obj->Set(String::NewSymbol("manufacturer"), String::New(manufacturer));
+      obj->Set(String::NewSymbol("description"), String::New(description));
+      obj->Set(String::NewSymbol("serial"), String::New(serial));
+      result->Set(i, obj);
+      curdev = curdev->next;
+  }
+
+  ftdi_list_free(&devlist);
+  ftdi_deinit(&ftdic);
+
+  return scope.Close(result);
 }
 
 Handle<Value> newDMX(const Arguments& args) {
@@ -103,11 +89,7 @@ void DMX::Init() {
 
 Handle<Value> DMX::New(const Arguments& args) {
   HandleScope scope;
-  FT_STATUS ftStatus;
-  FT_HANDLE ftHandle;
-  const size_t errln = 64;
-  char err [errln];
-
+  
   // Initalize new object
   DMX* obj = new DMX();
   pthread_mutex_init(&(obj->lock), NULL);
@@ -117,24 +99,52 @@ Handle<Value> DMX::New(const Arguments& args) {
   memset(obj->dmxVal,0,512);
   memset(obj->newVal,0,512);
   
+  struct ftdi_context ftdic;
+  struct ftdi_device_list *devlist, *curdev;
+  const size_t errln = 128;
+  char err[errln];
+  int ret;
+  unsigned int i = 0, devid = args[0]->Int32Value();
+
+  // Find device
+  if (ftdi_init(&ftdic) < 0)
+    return scope.Close(ThrowException(Exception::Error(String::New("ftdi_init failed"))));
+  if ((ret = ftdi_usb_find_all(&ftdic, &devlist, 0x0403, 0x6001)) < 0) {
+    snprintf(err, errln, "ftdi_usb_find_all failed: %d (%s)", ret, ftdi_get_error_string(&ftdic));
+    ftdi_list_free(&devlist);
+    ftdi_deinit(&ftdic);
+    return scope.Close(ThrowException(Exception::Error(String::New(err))));
+  }
+  for (curdev = devlist; curdev != NULL; i++) {
+    if (i == devid) break;
+    curdev = curdev->next;
+  }
+  if (curdev == NULL) {
+    snprintf(err, errln, "Cannot find device #%d", devid);
+    ftdi_list_free(&devlist);
+    ftdi_deinit(&ftdic);
+    return scope.Close(ThrowException(Exception::Error(String::New(err))));
+  }
+
   // Open device
-  unsigned int devid = args[0]->Int32Value();
-  ftStatus = FT_Open(devid, &ftHandle);
-  if (ftStatus != FT_OK) {
-    snprintf(err, errln, "Can't open ftdi2xx device %d: %s", devid, ft_status[ftStatus]);
+  if ((ret = ftdi_usb_open_dev(&ftdic, curdev->dev)) < 0) {
+    snprintf(err, errln, "ftdi_usb_open_dev failed: %d (%s)", ret, ftdi_get_error_string(&ftdic));
+    ftdi_list_free(&devlist);
+    ftdi_deinit(&ftdic);
     return scope.Close(ThrowException(Exception::Error(String::New(err))));
   }
-  
+  ftdi_list_free(&devlist);
+
   // Setup device
-  if ((FT_OK != (ftStatus = FT_SetBaudRate(ftHandle, 250000))) ||
-      (FT_OK != (ftStatus = FT_SetDataCharacteristics(ftHandle, FT_BITS_8, FT_STOP_BITS_2, FT_PARITY_NONE))) ||
-      (FT_OK != (ftStatus = FT_SetFlowControl(ftHandle, FT_FLOW_NONE, NULL, NULL))) ||
-      (FT_OK != (ftStatus = FT_Purge(ftHandle, FT_PURGE_RX | FT_PURGE_TX)))) {
-    snprintf(err, errln, "Can't setup device %d: %s", devid, ft_status[ftStatus]);
+  if (((ret = ftdi_set_baudrate(&ftdic, 250000)) < 0) || 
+      ((ret = ftdi_set_line_property2(&ftdic, BITS_8, STOP_BIT_2, NONE, BREAK_ON)) < 0) ||
+      ((ret = ftdi_usb_purge_buffers(&ftdic)) < 0)) {
+    snprintf(err, errln, "Can't setup device: %d (%s)", ret, ftdi_get_error_string(&ftdic));
+    ftdi_deinit(&ftdic);
     return scope.Close(ThrowException(Exception::Error(String::New(err))));
   }
-  
-  obj->ftHandle = ftHandle;
+
+  obj->ftdic = ftdic;
   obj->portOpen = true;
   obj->Wrap(args.This());
   return args.This();
@@ -151,7 +161,6 @@ void *DMX::thread_func(void* arg) {
   DMX *obj = (DMX*) arg;
   int i;
   unsigned char StartCode = 0;
-  unsigned int bytesWritten;
   obj->threadRun = true;
 
   while (obj->threadRun) {
@@ -168,11 +177,11 @@ void *DMX::thread_func(void* arg) {
     pthread_mutex_unlock(&(obj->lock));
 
     // Transmit DMX packet
-    FT_SetBreakOn(obj->ftHandle);
-    FT_SetBreakOff(obj->ftHandle);
-    FT_Write(obj->ftHandle, &StartCode,  1,   &bytesWritten);
-    FT_Write(obj->ftHandle, obj->dmxVal, 512, &bytesWritten);
-    if (obj->sleep.tv_nsec>0) nanosleep (&(obj->sleep), NULL);
+    ftdi_set_line_property2(&obj->ftdic, BITS_8, STOP_BIT_2, NONE, BREAK_ON);
+    ftdi_set_line_property2(&obj->ftdic, BITS_8, STOP_BIT_2, NONE, BREAK_OFF);
+    ftdi_write_data(&obj->ftdic, &StartCode,  1);
+    ftdi_write_data(&obj->ftdic, obj->dmxVal, 512);
+    if (obj->sleep.tv_nsec > 0) nanosleep(&(obj->sleep), NULL);
   }
   
   return NULL;

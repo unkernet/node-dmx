@@ -18,12 +18,10 @@ def configure(conf):
   
 def build(bld):
   obj = bld.new_task_gen('cxx', 'shlib', 'node_addon')
-  obj.cxxflags = '-Wall'
-  obj.rpath = '$ORIGIN'
+  obj.cxxflags = ["-Wall","-march=i586"]
   obj.target = TARGET
   obj.source = 'dmx.cc'
-  obj.lib = 'ftd2xx'
-  obj.libpath = ['.','..']
+  obj.lib = ['ftdi']
 
 def shutdown():
   if os.path.exists('build/Release/%s' % TARGET_FILE):
